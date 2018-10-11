@@ -1,14 +1,24 @@
 import asyncio
 import functools
-import pathlib
 import logging
+import pathlib
 import shutil
 import socket
+import ssl
 
 import nose
 
 import aioftp
 
+
+cert_path = pathlib.Path("certificates") / "Certificate.crt"
+key_path = pathlib.Path("certificates") / "Key.key"
+
+ssl_server = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+ssl_server.load_cert_chain(cert_path, key_path)
+
+ssl_client = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+ssl_client.load_verify_locations(cert_path)
 
 PORT = 8888
 
@@ -23,7 +33,7 @@ def aioftp_setup(*, server_args=([], {}), client_args=([], {})):
             s_args, s_kwargs = server_args
             c_args, c_kwargs = client_args
 
-            def run_in_loop(s_args, s_kwargs, c_args, c_kwargs):
+            def run_in_loop(s_args, s_kwargs, c_args, c_kwargs, s_ssl=None, c_ssl=None):
                 logging.basicConfig(
                     level=logging.INFO,
                     format="%(asctime)s [%(name)s] %(message)s",
@@ -31,8 +41,8 @@ def aioftp_setup(*, server_args=([], {}), client_args=([], {})):
                 )
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(None)
-                server = aioftp.Server(*s_args, loop=loop, **s_kwargs)
-                client = aioftp.Client(*c_args, loop=loop, **c_kwargs)
+                server = aioftp.Server(*s_args, loop=loop, ssl=s_ssl, **s_kwargs)
+                client = aioftp.Client(*c_args, loop=loop, ssl=c_ssl, **c_kwargs)
                 try:
                     loop.run_until_complete(f(loop, client, server))
                 finally:
@@ -42,12 +52,20 @@ def aioftp_setup(*, server_args=([], {}), client_args=([], {})):
                         client.close()
                     loop.close()
 
+            # ssl monkey patching for tests with self signed certificates
+            old_match_hostname = ssl.match_hostname
+            ssl.match_hostname = lambda cert, hostname: True
+
             if "path_io_factory" not in s_kwargs:
                 for factory in (aioftp.PathIO, aioftp.AsyncPathIO):
                     s_kwargs["path_io_factory"] = factory
                     run_in_loop(s_args, s_kwargs, c_args, c_kwargs)
+                    run_in_loop(s_args, s_kwargs, c_args, c_kwargs, ssl_server, ssl_client)
             else:
                 run_in_loop(s_args, s_kwargs, c_args, c_kwargs)
+                run_in_loop(s_args, s_kwargs, c_args, c_kwargs, ssl_server, ssl_client)
+
+            ssl.match_hostname = old_match_hostname
 
         return wrapper
 
